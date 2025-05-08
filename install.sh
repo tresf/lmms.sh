@@ -16,6 +16,11 @@ SITE="https://lmms.io"
 # TODO: Remove localhost when https://github.com/LMMS/lmms.io/pull/413 is merged
 SITE="http://192.168.1.201:8000"
 
+# For versioned downloads only
+OWNER=lmms
+REPO=lmms
+JSON_URL="https://api.github.com/repos/$OWNER/$REPO/releases?per_page=100"
+
 # Default to a local install
 install_type="local"
 build_type="stable"
@@ -150,6 +155,10 @@ get_arch() {
   esac
 }
 
+get_url_json() {
+  https://api.github.com/repos/lmms/lmms/releases?per_page=100
+}
+
 get_url() {
   want_url="$1"
   want_os="$2"
@@ -171,60 +180,174 @@ get_url() {
   echo "Parsing download links at '$want_url'..." >&2
   lines="$(curl_wget "$want_url" |grep -e "/download/artifact" -e "/releases/download")"
   while IFS= read -r line; do
-      # Attributes must match lmms.io/lib/Assets.php
-      os="$(echo "$line" | grep -E -io 'data-os="[^\"]+"' | awk -F\" '{print$2}')"
-      arch="$(echo "$line" | grep -E -io 'data-arch="[^\"]+"' | awk -F\" '{print$2}')"
-      qual="$(echo "$line" | grep -E -io 'data-qualifier="[^\"]+"' | awk -F\" '{print$2}')"
-      osver="$(echo "$line" | grep -E -io 'data-osver="[^\"]+"' | awk -F\" '{print$2}')"
+    # Attributes must match lmms.io/lib/Assets.php
+    os="$(echo "$line" | grep -E -io 'data-os="[^\"]+"' | awk -F\" '{print$2}')"
+    arch="$(echo "$line" | grep -E -io 'data-arch="[^\"]+"' | awk -F\" '{print$2}')"
+    qual="$(echo "$line" | grep -E -io 'data-qualifier="[^\"]+"' | awk -F\" '{print$2}')"
+    osver="$(echo "$line" | grep -E -io 'data-osver="[^\"]+"' | awk -F\" '{print$2}')"
 
-      url="$(echo "$line" | grep -E -io 'href="[^\"]+"' | awk -F\" '{print$2}')"
-      if [[ $url == /download/* ]]; then
-        url="$SITE/$url" # fix relative links
-      fi
+    url="$(echo "$line" | grep -E -io 'href="[^\"]+"' | awk -F\" '{print$2}')"
+    if [[ $url == /download/* ]]; then
+      url="$SITE/$url" # fix relative links
+    fi
 
-      if [[ $1 == /pull-request/* ]]; then
-        type="pull-request"
-      else
-        case "$url" in
-          *-alpha*) type="alpha"
-            ;;
-          *-beta*) type="beta"
-            ;;
-          */artifact/*) type="nightly"
-            ;;
-          *) type="stable"
-            ;;
-          esac
-      fi
+    if [[ $1 == /pull-request/* ]]; then
+      type="pull-request"
+    else
+      case "$url" in
+        *-alpha*) type="alpha"
+          ;;
+        *-beta*) type="beta"
+          ;;
+        */artifact/*) type="nightly"
+          ;;
+        *) type="stable"
+          ;;
+        esac
+    fi
 
-      _debug="os: '$os', osver: '$osver', arch: '$arch', type: '$type', qual: '$qual', url: '$url'"
+    _debug="os: '$os', osver: '$osver', arch: '$arch', type: '$type', qual: '$qual', url: '$url'"
 
-      # Handle optional params
-      opt_qual=""
-      if [ ! -z "$want_qual" ]; then
-        opt_qual="$qual"
-      fi
-      opt_osver=""
-      if [ ! -z "$want_osver" ]; then
-        opt_osver="$osver"
-      fi
+    # Handle optional params
+    opt_qual=""
+    if [ ! -z "$want_qual" ]; then
+      opt_qual="$qual"
+    fi
+    opt_osver=""
+    if [ ! -z "$want_osver" ]; then
+      opt_osver="$osver"
+    fi
 
-      if [ "$want_os" = "$os" ] && [ "$want_arch" = "$arch" ] && [ "$want_type" = "$type" ] && [ "$want_qual" = "$opt_qual" ] && [ "$want_osver" = "$opt_osver" ]; then
-        if [ ! -z "$DEBUG" ]; then
-          echo "Using: $_debug" >&2
-        fi
-        echo "$url"
-        return
-      else
-        if [ ! -z "$DEBUG" ]; then
-          echo "Skipping: $_debug" >&2
-        fi
+    if [ "$want_os" = "$os" ] && [ "$want_arch" = "$arch" ] && [ "$want_type" = "$type" ] && [ "$want_qual" = "$opt_qual" ] && [ "$want_osver" = "$opt_osver" ]; then
+      if [ ! -z "$DEBUG" ]; then
+        echo "Using: $_debug" >&2
       fi
+      echo "$url"
+      return
+    else
+      if [ ! -z "$DEBUG" ]; then
+        echo "Skipping: $_debug" >&2
+      fi
+    fi
 
   done <<< "$lines"
 }
 
-want_url="$(get_url "$download_url" "$(get_os)" "$(get_arch)" "$build_type" "$build_qualifier" "$build_osver")"
+get_url_json() {
+  want_url="$1"
+  want_os="$2"
+  want_arch="$3"
+  want_type="$4"
+  want_qual="$5"
+  want_osver="$6"
+  want_version="$7"
+
+  echo "Parsing download links at '$want_url'..." >&2
+
+  lines="$(curl_wget "$want_url")"
+
+  urls=()
+  while IFS= read -r line; do
+    case $line in
+      *"\"tag_name\":"*)
+        tag_name="$(echo "$line" |cut -d '"' -f4 |tr -d '"'|tr -d ',' |tr -d ' ')"
+        if [ "$want_version" = "$tag_name" ]; then
+          found=true
+        else
+          if [ "$found" = true ]; then
+            # Stop after the first found tag
+            break
+          fi
+        fi
+        ;;
+      *"\"browser_download_url\":"*)
+        if [ "$found" = true ]; then
+          url="$(echo "$line" |cut -d '"' -f4 |tr -d '"'|tr -d ',' |tr -d ' ')"
+          urls+=("$url")
+          if [ ! -z "$DEBUG" ]; then
+            echo "Found matching version: $url" >&2
+          fi
+        fi
+        ;;
+    esac
+  done <<< "$lines"
+
+  if [ "$found" != true ]; then
+    return
+  fi
+
+  # Filter matching OSs
+  os_urls=()
+  for url in "${urls[@]}"; do
+    case "$url" in
+      *-lin|*.AppImage|*.run)
+        os="linux"
+      ;;
+      *-mac|*.dmg|*.pkg)
+        os="macos"
+      ;;
+      *-win|*.exe|*.msi)
+        os="windows"
+      ;;
+    esac
+    if [ "$want_os" = "$os" ]; then
+      os_urls+=("$url")
+      if [ ! -z "$DEBUG" ]; then
+        echo "Found matching os: $url" >&2
+      fi
+    fi
+  done
+
+  # Filter again, but matching arch
+  arch_urls=()
+  for url in "${os_urls[@]}"; do
+    case "$url" in
+      *-riscv64*) arch="riscv64"
+      ;;
+      *-riscv*) arch="riscv"
+      ;;
+      *-arm64*|*-aarch64*) arch="arm64"
+      ;;
+      *-arm*) arch="arm"
+      ;;
+      *-x86_64|*-win64*|*-64*) arch="intel64"
+      ;;
+      *-*86*|*-win32*) arch="intel"
+      ;;
+      *)
+        case "$want_version" in
+          v1.3*)
+            # macOS defaults to arm64 for 1.3 and higher
+            if [ "$want_os" = "macos" ]; then
+              arch="arm64"
+            else
+              arch="intel64"
+            fi
+          ;;
+          *)
+            arch="intel64"
+          ;;
+        esac
+      ;;
+    esac
+    if [ "$want_arch" = "$arch" ]; then
+      arch_urls+=("$url")
+      if [ ! -z "$DEBUG" ]; then
+        echo "Found matching arch: $url" >&2
+      fi
+    fi
+  done
+
+  # TODO: Filter remaining URLs and echo to the screen
+}
+
+if [ ! -z "$version" ]; then
+  # Get versioned download URL from releases json
+  want_url="$(get_url_json "$JSON_URL" "$(get_os)" "$(get_arch)" "$build_type" "$build_qualifier" "$build_osver" "$version")"
+else
+  # Get download URL from downloads page
+  want_url="$(get_url "$download_url" "$(get_os)" "$(get_arch)" "$build_type" "$build_qualifier" "$build_osver")"
+fi
 
 if [ ! -z "$want_url" ]; then
   echo "Downloading $want_url..."
