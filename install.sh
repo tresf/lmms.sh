@@ -1,15 +1,27 @@
 #!/usr/bin/env bash
 
+# LMMS installer, for bash
+#
+# This script was downloaded from https://github.com/lmms/lmms.sh and is part of the LMMS project
+# Contribute to this script by visiting the above website and opening an issue or pull request
+#
+# Usage:
+#
+# ./install.sh [version] ("stable", "alpha", "nightly", "v1.2.2", etc)
+
 set -e
 
 SITE="https://lmms.io"
 
 # TODO: Remove localhost when https://github.com/LMMS/lmms.io/pull/413 is merged
-SITE="http://localhost:8000"
+SITE="http://192.168.1.201:8000"
 
 # Default to a local install
 install_type="local"
 build_type="stable"
+build_qualifier=""
+build_osver="" # TODO: implement this!
+version="" # TODO: implement this!
 
 print_help() {
   # Additional help text
@@ -18,6 +30,7 @@ print_help() {
   fi
   # TODO: Actually add helpful text here
   echo "This is help (unfinished)"
+  exit 1
 }
 
 curl_wget() {
@@ -34,13 +47,13 @@ curl_wget() {
 # Parse args passed to this script
 for arg in "$@"; do
   case "$arg" in
-  stable) build_type="stable"
+  stable*) build_type="stable"
     ;;
-  alpha) build_type="alpha"
+  alpha*) build_type="alpha"
     ;;
-  beta) build_type="beta"
+  beta*) build_type="beta"
     ;;
-  nightly) build_type="nightly"
+  nightly*) build_type="nightly"
     ;;
   pr*) build_type="pull-request" && pr="$arg"
     ;;
@@ -55,6 +68,14 @@ for arg in "$@"; do
   esac
 done
 
+# Parse qualifier, if provided (e.g. "msvc")
+for arg in "$@"; do
+  case "$arg" in
+  stable:*|alpha:*|beta:*|nightly:*|v*:*) build_qualifier="$(echo "$arg" | cut -d ':' -f 2)"
+    ;;
+  esac
+done
+
 # Determine URL for specified build_type
 download_url=""
 case "$build_type" in
@@ -65,7 +86,6 @@ pull-request)
     true # ok
   else
      print_help "Pull-request '$id' is invalid"
-     exit 1
   fi
   download_url="$SITE/download/pull-request/$id"
   ;;
@@ -73,12 +93,85 @@ pull-request)
   ;;
 esac
 
-parse_downloads() {
-  echo "Parsing download links at '$1'..."
-  lines="$(curl_wget "$1" |grep -e "/download/artifact" -e "/releases/download")"
-  #links="$(curl_wget "$MAIN_URL" |grep "/releases/download" | grep -E -io 'href="[^\"]+"' | awk -F\" '{print$2}')"
-  #echo "$links"
+get_os() {
+  # OS must match lmms.io/lib/Os.php (lowercase)
+  case "$OSTYPE" in
+    cygwin*|msys*|win32*) echo "windows"
+      ;;
+    darwin*) echo "macos"
+      ;;
+    linux*) echo "linux"
+      ;;
+    *) echo "unknown"
+      ;;
+  esac
+}
+
+get_arch() {
+  # OS must match lmms.io/lib/Platform.php/Architecture (lowercase)
+
+  # Detect WoW environment
+  if printenv 'ProgramFiles(Arm)' 2>&1 >/dev/null; then
+    echo "arm64"
+    return
+  elif printenv 'ProgramFiles(x86)' 2>&1 >/dev/null; then
+    echo "intel64"
+    return
+  fi
+
+  case "$(uname -m)" in
+    *arm64*|*aarch64*)
+      echo "arm64"
+      ;;
+    *arm*)
+      echo "arm"
+      ;;
+    *riscv64*)
+      echo "riscv64"
+      ;;
+    *riscv*)
+      echo "riscv"
+      ;;
+    *ppc64*)
+      echo "ppc64"
+      ;;
+    *ppc*)
+      echo "ppc"
+      ;;
+    *amd64*|*86_64*|*x64*)
+      echo "intel64"
+      ;;
+    *86*)
+      echo "intel"
+      ;;
+    *)
+      echo "unknown"
+      ;;
+  esac
+}
+
+get_url() {
+  want_url="$1"
+  want_os="$2"
+  want_arch="$3"
+  want_type="$4"
+  want_qual="$5"
+  want_osver="$6"
+
+  if [ ! -z "$DEBUG" ]; then
+    echo "Wanted: os: '$want_os', osver: '$want_osver', arch: '$want_arch', build: '$want_type', qual: '$want_qual'" >&2
+  fi
+
+  echo "Platform detected: $want_os:$want_arch" >&2
+  echo "Build requested: $want_type" >&2
+  if [ ! -z "$want_qual" ]; then
+    echo "Build qualifier: $want_qual" >&2
+  fi
+
+  echo "Parsing download links at '$want_url'..." >&2
+  lines="$(curl_wget "$want_url" |grep -e "/download/artifact" -e "/releases/download")"
   while IFS= read -r line; do
+      # Attributes must match lmms.io/lib/Assets.php
       os="$(echo "$line" | grep -E -io 'data-os="[^\"]+"' | awk -F\" '{print$2}')"
       arch="$(echo "$line" | grep -E -io 'data-arch="[^\"]+"' | awk -F\" '{print$2}')"
       qual="$(echo "$line" | grep -E -io 'data-qualifier="[^\"]+"' | awk -F\" '{print$2}')"
@@ -104,15 +197,37 @@ parse_downloads() {
           esac
       fi
 
-      echo "Download found:"
-      echo "  os: $os"
-      echo "  osver: $osver"
-      echo "  arch: $arch"
-      echo "  type: $type"
-      echo "  qual: $qual"
-      echo "  url: $url"
-      echo ""
+      _debug="os: '$os', osver: '$osver', arch: '$arch', type: '$type', qual: '$qual', url: '$url'"
+
+      # Handle optional params
+      opt_qual=""
+      if [ ! -z "$want_qual" ]; then
+        opt_qual="$qual"
+      fi
+      opt_osver=""
+      if [ ! -z "$want_osver" ]; then
+        opt_osver="$osver"
+      fi
+
+      if [ "$want_os" = "$os" ] && [ "$want_arch" = "$arch" ] && [ "$want_type" = "$type" ] && [ "$want_qual" = "$opt_qual" ] && [ "$want_osver" = "$opt_osver" ]; then
+        if [ ! -z "$DEBUG" ]; then
+          echo "Using: $_debug" >&2
+        fi
+        echo "$url"
+        return
+      else
+        if [ ! -z "$DEBUG" ]; then
+          echo "Skipping: $_debug" >&2
+        fi
+      fi
+
   done <<< "$lines"
 }
 
-parse_downloads "$download_url"
+want_url="$(get_url "$download_url" "$(get_os)" "$(get_arch)" "$build_type" "$build_qualifier" "$build_osver")"
+
+if [ ! -z "$want_url" ]; then
+  echo "Downloading $want_url..."
+else
+  echo "A download for this platform wasn't found.  For verbose output, export DEBUG=1 and run again."
+fi
